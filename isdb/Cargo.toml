@@ -1,0 +1,17 @@
+[package]
+name = "isdb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mpegts = { path = "../mpegts" }
+mmttlv = { path = "../mmttlv" }
+# JIS X 0208. What ARIB adds on top of it is in `arib`.
+encoding_rs = "0.8"
+# zlib of the compressed modules in a data carousel (STD-B24).
+miniz_oxide = "0.8"

@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = [
+    "coax",
+    "isdb",
+    "mmttlv",
+    "mpegts",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+# Libraries only: profiles are left to the programs that link them.

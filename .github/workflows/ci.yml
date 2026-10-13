@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Add the Rust targets
+        run: rustup target add x86_64-pc-windows-gnullvm i686-pc-windows-gnullvm aarch64-apple-darwin
+
+      - name: Check the formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy (Linux)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (Windows)
+        run: |
+          cargo clippy --all-targets --target x86_64-pc-windows-gnullvm -- -D warnings
+          cargo clippy --all-targets --target i686-pc-windows-gnullvm -- -D warnings
+
+      - name: Clippy (macOS)
+        run: cargo clippy --all-targets --target aarch64-apple-darwin -- -D warnings
+
+  test:
+    name: Test (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            nextest: linux
+          - runner: macos-15
+            nextest: mac
+          - runner: windows-latest
+            nextest: windows-tar
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-nextest
+        run: curl --proto '=https' --tlsv1.2 -LsSf "https://get.nexte.st/latest/${{ matrix.nextest }}" | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+
+      - name: Test
+        run: cargo nextest run --workspace
+
+      - name: Doctest
+        run: cargo test --workspace --doc
