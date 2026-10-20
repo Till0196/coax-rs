@@ -9,6 +9,28 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::sync::OnceLock;
+
+/// The name every request carries as its `User-Agent`, when the program has not
+/// given its own.
+const DRIVER: &str = "BonDriver_coax";
+
+static AGENT: OnceLock<String> = OnceLock::new();
+
+/// Names the program in the `User-Agent` of every request from here on, so that
+/// a server's log tells one client from another. A program calls it once,
+/// before its first request; one that never does goes by `BonDriver_coax`. Only the
+/// first call counts, and a name that would break the header line is not
+/// taken.
+pub fn name_agent(name: &str) {
+    if !name.is_empty() && !name.contains(['\r', '\n']) {
+        let _ = AGENT.set(name.to_owned());
+    }
+}
+
+fn agent() -> &'static str {
+    AGENT.get().map_or(DRIVER, String::as_str)
+}
 
 /// What the daemon answered.
 #[derive(Debug)]
@@ -105,9 +127,10 @@ fn send_on<T: Read + Write>(
 ) -> io::Result<Response<T>> {
     let connection = reader.get_mut();
     let ending = if keep { "keep-alive" } else { "close" };
+    let agent = agent();
     write!(
         connection,
-        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: BonDriver_coax\r\nAccept: */*\r\nConnection: {ending}\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {agent}\r\nAccept: */*\r\nConnection: {ending}\r\n"
     )?;
     for (name, value) in headers {
         // Nothing here escapes: a field value cannot carry a line ending, and
