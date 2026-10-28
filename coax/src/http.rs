@@ -13,13 +13,13 @@ use std::sync::OnceLock;
 
 /// The name every request carries as its `User-Agent`, when the program has not
 /// given its own.
-const DRIVER: &str = "BonDriver_coax";
+const LIBRARY: &str = concat!("coax-rs/", env!("CARGO_PKG_VERSION"));
 
 static AGENT: OnceLock<String> = OnceLock::new();
 
 /// Names the program in the `User-Agent` of every request from here on, so that
 /// a server's log tells one client from another. A program calls it once,
-/// before its first request; one that never does goes by `BonDriver_coax`. Only the
+/// before its first request; one that never does goes by `coax-rs`. Only the
 /// first call counts, and a name that would break the header line is not
 /// taken.
 pub fn name_agent(name: &str) {
@@ -29,7 +29,7 @@ pub fn name_agent(name: &str) {
 }
 
 fn agent() -> &'static str {
-    AGENT.get().map_or(DRIVER, String::as_str)
+    AGENT.get().map_or(LIBRARY, String::as_str)
 }
 
 /// What the daemon answered.
@@ -507,8 +507,11 @@ mod tests {
         drop(response);
         assert_eq!(
             String::from_utf8_lossy(&connection.asked),
-            "GET /tune HTTP/1.1\r\nHost: coaxd\r\nUser-Agent: BonDriver_coax\r\n\
-             Accept: */*\r\nConnection: keep-alive\r\n\r\n"
+            format!(
+                "GET /tune HTTP/1.1\r\nHost: coaxd\r\nUser-Agent: coax-rs/{}\r\n\
+                 Accept: */*\r\nConnection: keep-alive\r\n\r\n",
+                env!("CARGO_PKG_VERSION")
+            )
         );
     }
 
