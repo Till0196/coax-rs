@@ -177,12 +177,11 @@ fn claim_name(socket: &str) -> String {
 fn detach(command: &mut Command) {
     use std::os::windows::process::CommandExt;
 
-    /// A console of its own that is never shown. Not `DETACHED_PROCESS`, which
-    /// leaves the daemon with no console at all: measured here, one started
-    /// that way exited before it had opened its socket.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // Avoid allocating a console host as well as hiding its window. Standard
+    // handles are supplied explicitly by start(), including without a console.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
 
-    command.creation_flags(CREATE_NO_WINDOW);
+    command.creation_flags(DETACHED_PROCESS);
 }
 
 #[cfg(not(windows))]
