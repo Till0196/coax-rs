@@ -60,7 +60,10 @@ jobs:
           persist-credentials: false
 
       - name: Install cargo-nextest
-        run: curl --proto '=https' --tlsv1.2 -LsSf "https://get.nexte.st/latest/${{ matrix.nextest }}" | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+        run: |
+          mkdir -p "${CARGO_HOME:-$HOME/.cargo}/bin"
+          curl --proto '=https' --tlsv1.2 -LsSf "https://get.nexte.st/latest/${{ matrix.nextest }}" | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
 
       - name: Test
         run: cargo nextest run --workspace
