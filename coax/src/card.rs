@@ -171,8 +171,11 @@ impl Cards {
             atr: parse_hex(answered.text("atr").unwrap_or_default()),
             sharing: answered
                 .get("sharing")
-                .and_then(json::Value::as_u64)
-                .map_or(-1, |value| value as i32),
+                .and_then(|value| match value {
+                    json::Value::Number(text) => text.parse::<i32>().ok(),
+                    _ => None,
+                })
+                .unwrap_or(0),
         })
     }
 

@@ -35,6 +35,10 @@ pub trait Slots: Send + Sync {
 
 /// One slot being watched.
 pub trait Slot: Send + Sync {
+    /// False when the reader could not be measured, rather than being empty.
+    fn available(&self) -> bool {
+        true
+    }
     fn present(&self) -> bool;
     fn atr(&self) -> Vec<u8>;
     /// How many connections hold the card, or -1 for an exclusive one.
@@ -87,6 +91,7 @@ struct State {
 
 #[derive(Debug, Default)]
 struct Entry {
+    unavailable: bool,
     present: bool,
     measured: bool,
     atr: Vec<u8>,
@@ -158,10 +163,11 @@ impl Table {
         let Some(known) = state.cards.get_mut(reader) else {
             return;
         };
-        if known.measured && known.present != present {
+        if known.unavailable || known.measured && known.present != present {
             known.events = known.events.wrapping_add(1);
         }
         known.measured = true;
+        known.unavailable = false;
         known.present = present;
         known.atr = atr.to_vec();
     }
@@ -182,7 +188,9 @@ impl Table {
             .iter()
             .map(|name| {
                 let known = &state.cards[name];
-                let (flags, atr) = if known.present {
+                let (flags, atr) = if known.unavailable {
+                    (STATE_UNKNOWN, Vec::new())
+                } else if known.present {
                     // Powered and specific follow presence because a card these
                     // interfaces can see at all has been through its answer to
                     // reset: there is no state in between.
@@ -282,18 +290,34 @@ impl Table {
                     Ok(slot) => {
                         held.insert(name.clone(), slot);
                     }
-                    Err(_) => continue,
+                    Err(_) => {
+                        if let Some(known) = self
+                            .lock()
+                            .cards
+                            .get_mut(&name)
+                            .filter(|known| !known.unavailable)
+                        {
+                            known.unavailable = true;
+                            known.present = false;
+                            known.atr.clear();
+                            known.sharing = 0;
+                            known.events = known.events.wrapping_add(1);
+                            moved = true;
+                        }
+                        continue;
+                    }
                 }
             }
             let slot = &held[&name];
-            let present = slot.present();
+            let available = slot.available();
+            let present = available && slot.present();
             let atr = slot.atr();
-            let sharing = slot.sharing();
+            let sharing = if available { slot.sharing() } else { 0 };
             let mut state = self.lock();
             let Some(known) = state.cards.get_mut(&name) else {
                 continue;
             };
-            if !known.measured || known.present != present {
+            if !known.measured || known.present != present || known.unavailable == available {
                 known.events = known.events.wrapping_add(1);
                 moved = true;
             }
@@ -302,9 +326,74 @@ impl Table {
             }
             known.measured = true;
             known.present = present;
+            known.unavailable = !available;
             known.sharing = sharing;
             known.atr = if present { atr } else { Vec::new() };
         }
         moved
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Source {
+        failed: Arc<AtomicBool>,
+        present: Arc<AtomicBool>,
+    }
+    impl Slots for Source {
+        fn readers(&self) -> io::Result<Vec<String>> {
+            Ok(vec!["test reader".into()])
+        }
+        fn open(&self, _: &str) -> io::Result<Box<dyn Slot>> {
+            if self.failed.load(Ordering::SeqCst) {
+                return Err(io::Error::other("reader unavailable"));
+            }
+            Ok(Box::new(Source {
+                failed: self.failed.clone(),
+                present: self.present.clone(),
+            }))
+        }
+    }
+    impl Slot for Source {
+        fn available(&self) -> bool {
+            !self.failed.load(Ordering::SeqCst)
+        }
+        fn present(&self) -> bool {
+            self.present.load(Ordering::SeqCst)
+        }
+        fn atr(&self) -> Vec<u8> {
+            vec![0x3b, 0]
+        }
+        fn sharing(&self) -> i32 {
+            0
+        }
+    }
+    #[test]
+    fn an_unavailable_reader_recovers_without_keeping_a_stale_card() {
+        let failed = Arc::new(AtomicBool::new(false));
+        let present = Arc::new(AtomicBool::new(true));
+        let table = Table::new(
+            Box::new(Source {
+                failed: failed.clone(),
+                present: present.clone(),
+            }),
+            Duration::ZERO,
+        );
+        let mut held = HashMap::new();
+        assert!(table.sweep(&mut held));
+        assert_ne!(table.states()[0].state & STATE_PRESENT, 0);
+        failed.store(true, Ordering::SeqCst);
+        assert!(table.sweep(&mut held));
+        assert_eq!(table.states()[0].state, STATE_UNKNOWN);
+        assert!(table.states()[0].atr.is_empty());
+        present.store(false, Ordering::SeqCst);
+        failed.store(false, Ordering::SeqCst);
+        assert!(table.sweep(&mut held));
+        assert_eq!(table.states()[0].state, STATE_ABSENT);
+        held.clear();
+        failed.store(true, Ordering::SeqCst);
+        assert!(table.sweep(&mut held));
+        assert_eq!(table.states()[0].state, STATE_UNKNOWN);
     }
 }

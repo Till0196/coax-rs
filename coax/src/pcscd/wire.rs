@@ -80,10 +80,13 @@ pub const SIZE_GET_SET: usize = 4 + 4 + MAX_ATTRIBUTE + 4 + 4;
 pub const SIZE_WAIT: usize = 8;
 pub const SIZE_EVENTS: usize = 8;
 
-/// A status code, `SCARD_*` in `pcsclite.h`. The numbers are the same as
-/// Windows'.
+/// A canonical Windows PC/SC status. `wire()` translates the one value that
+/// differs in pcsc-lite before it is written to a client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Code(pub u32);
+
+// SCARD_E_UNSUPPORTED_FEATURE differs between pcsc-lite and Windows.
+const PCSC_UNSUPPORTED_FEATURE: u32 = 0x8010_001f;
 
 impl Code {
     pub const SUCCESS: Self = Self(0);
@@ -102,6 +105,15 @@ impl Code {
     pub const SERVICE_STOPPED: Self = Self(0x8010_001E);
     pub const UNSUPPORTED_FEATURE: Self = Self(0x8010_0022);
     pub const NO_READERS_AVAILABLE: Self = Self(0x8010_002E);
+
+    /// Translate the internal Windows status to pcsc-lite at the wire boundary.
+    pub fn wire(self) -> u32 {
+        if self == Self::UNSUPPORTED_FEATURE {
+            PCSC_UNSUPPORTED_FEATURE
+        } else {
+            self.0
+        }
+    }
 
     /// The code a result travels as.
     pub fn of<T>(result: &Result<T, Code>) -> Self {
@@ -311,5 +323,10 @@ mod tests {
         let mut raw = [0xFFu8; 8];
         put_c_string(&mut raw, "0123456789");
         assert_eq!(&raw, b"0123456\0");
+    }
+    #[test]
+    fn unsupported_feature_is_translated_at_the_wire_boundary() {
+        assert_eq!(Code::UNSUPPORTED_FEATURE.wire(), 0x8010_001f);
+        assert_eq!(Code::RESET_CARD.wire(), 0x8010_0068);
     }
 }

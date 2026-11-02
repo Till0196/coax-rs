@@ -348,6 +348,11 @@ fn a_cancel_from_another_connection_wakes_the_waiter() {
     assert_eq!(waiter.wait_result(), Code::SUCCESS.0);
     waiter.send(command::WAIT_READER_STATE_CHANGE, &[]);
 
+    // A round trip on this connection ensures the wait has been registered
+    // before the other connection sends its cancellation.
+    waiter.send(command::GET_STATE_SIZE, &[]);
+    assert_eq!(wire::field(&waiter.receive(4), 0) as usize, MAX_READERS);
+
     let mut canceller = Client::dial(&running);
     canceller.handshake(VERSION_MAJOR, VERSION_MINOR);
     let mut raw = [0u8; SIZE_CANCEL];
@@ -457,4 +462,20 @@ fn a_served_socket_is_refused_twice_and_removed_when_dropped() {
     assert_eq!(again.kind(), io::ErrorKind::AddrInUse);
     drop(serving);
     assert!(!path.exists(), "removed");
+}
+
+#[test]
+fn unsupported_control_uses_pcsc_lite_status_on_the_wire() {
+    let running = running(true);
+    let mut client = Client::dial(&running);
+    client.handshake(VERSION_MAJOR, VERSION_MINOR);
+    let (context, result) = client.establish();
+    assert_eq!(result, 0);
+    let (card, _, result) = client.connect(context);
+    assert_eq!(result, 0);
+    let mut raw = [0u8; SIZE_CONTROL];
+    wire::put(&mut raw, 0, card as u32);
+    wire::put(&mut raw, 3, 16);
+    client.send(command::CONTROL, &raw);
+    assert_eq!(wire::field(&client.receive(SIZE_CONTROL), 5), 0x8010_001f);
 }

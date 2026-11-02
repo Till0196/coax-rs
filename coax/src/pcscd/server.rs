@@ -308,7 +308,7 @@ impl Connection {
         // client's, so that a client one minor behind can try again.
         wire::put(&mut raw, 0, wire::VERSION_MAJOR);
         wire::put(&mut raw, 1, wire::VERSION_MINOR);
-        wire::put(&mut raw, 2, result.0);
+        wire::put(&mut raw, 2, result.wire());
         self.reply(&raw)
     }
 
@@ -326,7 +326,7 @@ impl Connection {
             (identifier, Code::SUCCESS)
         };
         wire::put(&mut raw, 1, identifier);
-        wire::put(&mut raw, 2, result.0);
+        wire::put(&mut raw, 2, result.wire());
         self.reply(&raw)
     }
 
@@ -355,7 +355,7 @@ impl Connection {
         } else {
             Code::INVALID_HANDLE
         };
-        wire::put(&mut raw, 1, result.0);
+        wire::put(&mut raw, 1, result.wire());
         self.table().refresh();
         self.reply(&raw)
     }
@@ -388,7 +388,7 @@ impl Connection {
         };
         wire::set_word(&mut raw, 140, identifier as u32);
         wire::set_word(&mut raw, 144, active);
-        wire::set_word(&mut raw, 148, result.0);
+        wire::set_word(&mut raw, 148, result.wire());
         self.table().refresh();
         self.reply(&raw)
     }
@@ -426,7 +426,7 @@ impl Connection {
             card.reconnect(share, protocols, initialization)
         });
         wire::put(&mut raw, 4, *answer.as_ref().unwrap_or(&PROTOCOL_UNDEFINED));
-        wire::put(&mut raw, 5, Code::of(&answer).0);
+        wire::put(&mut raw, 5, Code::of(&answer).wire());
         self.table().refresh();
         self.reply(&raw)
     }
@@ -442,7 +442,7 @@ impl Connection {
                 None => Err(Code::INVALID_HANDLE),
             },
         };
-        wire::put(&mut raw, 2, Code::of(&result).0);
+        wire::put(&mut raw, 2, Code::of(&result).wire());
         self.table().refresh();
         self.reply(&raw)
     }
@@ -452,7 +452,7 @@ impl Connection {
         let result = self
             .card(wire::field(&raw, 0))
             .and_then(|card| card.begin_transaction());
-        wire::put(&mut raw, 1, Code::of(&result).0);
+        wire::put(&mut raw, 1, Code::of(&result).wire());
         self.reply(&raw)
     }
 
@@ -463,7 +463,7 @@ impl Connection {
             disposition(chosen)?;
             card.end_transaction(chosen)
         });
-        wire::put(&mut raw, 2, Code::of(&result).0);
+        wire::put(&mut raw, 2, Code::of(&result).wire());
         self.reply(&raw)
     }
 
@@ -486,7 +486,7 @@ impl Connection {
             },
             None => Code::INVALID_HANDLE,
         };
-        wire::put(&mut raw, 1, result.0);
+        wire::put(&mut raw, 1, result.wire());
         self.reply(&raw)
     }
 
@@ -510,7 +510,7 @@ impl Connection {
         let (received, protocol) = answer.clone().unwrap_or((Vec::new(), send_protocol));
         wire::put(&mut raw, 4, protocol);
         wire::put(&mut raw, 6, received.len() as u32);
-        wire::put(&mut raw, 7, Code::of(&answer).0);
+        wire::put(&mut raw, 7, Code::of(&answer).wire());
         self.reply(&raw)?;
         if answer.is_ok() {
             self.reply(&received)?;
@@ -546,7 +546,7 @@ impl Connection {
         }
         let received = answer.clone().unwrap_or_default();
         wire::put(&mut raw, 4, received.len() as u32);
-        wire::put(&mut raw, 5, Code::of(&answer).0);
+        wire::put(&mut raw, 5, Code::of(&answer).wire());
         self.reply(&raw)?;
         if answer.is_ok() {
             self.reply(&received)?;
@@ -586,7 +586,7 @@ impl Connection {
             )
         };
         wire::set_word(&mut raw, 8 + MAX_ATTRIBUTE, length as u32);
-        wire::set_word(&mut raw, 12 + MAX_ATTRIBUTE, result.0);
+        wire::set_word(&mut raw, 12 + MAX_ATTRIBUTE, result.wire());
         self.reply(&raw)
     }
 
@@ -615,7 +615,7 @@ impl Connection {
             // cancel one the application never asked to cancel.
             (Some(_), None) => Code::SUCCESS,
         };
-        wire::put(&mut raw, 1, result.0);
+        wire::put(&mut raw, 1, result.wire());
         self.reply(&raw)
     }
 

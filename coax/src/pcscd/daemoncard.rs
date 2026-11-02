@@ -125,6 +125,12 @@ impl Card for DaemonCard {
         if protocols & PROTOCOL_T1 == 0 {
             return Err(Code::PROTO_MISMATCH);
         }
+        if initialization == 3 {
+            return Err(Code::UNSUPPORTED_FEATURE);
+        }
+        if initialization > 3 {
+            return Err(Code::INVALID_VALUE);
+        }
         let old = self.held.as_mut().ok_or(Code::INVALID_HANDLE)?;
         if old.open() {
             let _ = old.close(disposition_name(initialization));
@@ -163,7 +169,8 @@ impl Card for DaemonCard {
         let present = self
             .cards
             .events(&self.reader, 0, 0)
-            .map_or(true, |seen| seen.present);
+            .map_err(|refusal| translate(&refusal))?
+            .present;
         Ok((present, atr))
     }
 
@@ -242,6 +249,7 @@ impl Slots for DaemonCards {
         let watched = Arc::new(Watched {
             seen: Mutex::new(first),
             stop: AtomicBool::new(false),
+            available: AtomicBool::new(true),
         });
         let cards = self.cards.clone();
         let reader = reader.to_owned();
@@ -256,8 +264,14 @@ impl Slots for DaemonCards {
                         .unwrap_or_else(|e| e.into_inner())
                         .events;
                     match cards.events(&reader, since, WATCH_WAIT) {
-                        Ok(seen) => *watcher.seen.lock().unwrap_or_else(|e| e.into_inner()) = seen,
-                        Err(_) => std::thread::sleep(RETRY_AFTER),
+                        Ok(seen) => {
+                            *watcher.seen.lock().unwrap_or_else(|e| e.into_inner()) = seen;
+                            watcher.available.store(true, Ordering::Release);
+                        }
+                        Err(_) => {
+                            watcher.available.store(false, Ordering::Release);
+                            std::thread::sleep(RETRY_AFTER);
+                        }
                     }
                 }
             })?;
@@ -267,6 +281,7 @@ impl Slots for DaemonCards {
 
 #[derive(Debug)]
 struct Watched {
+    available: AtomicBool,
     seen: Mutex<card::SlotState>,
     stop: AtomicBool,
 }
@@ -275,6 +290,9 @@ struct Watched {
 struct WatchedSlot(Arc<Watched>);
 
 impl Slot for WatchedSlot {
+    fn available(&self) -> bool {
+        self.0.available.load(Ordering::Acquire)
+    }
     fn present(&self) -> bool {
         self.0
             .seen
