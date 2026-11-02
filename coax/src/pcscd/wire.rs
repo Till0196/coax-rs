@@ -97,6 +97,7 @@ impl Code {
     pub const PROTO_MISMATCH: Self = Self(0x8010_000F);
     pub const INVALID_VALUE: Self = Self(0x8010_0011);
     pub const NOT_TRANSACTED: Self = Self(0x8010_0016);
+    pub const RESET_CARD: Self = Self(0x8010_0068);
     pub const NO_SERVICE: Self = Self(0x8010_001D);
     pub const SERVICE_STOPPED: Self = Self(0x8010_001E);
     pub const UNSUPPORTED_FEATURE: Self = Self(0x8010_0022);

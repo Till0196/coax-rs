@@ -31,6 +31,8 @@ pub enum Refusal {
         /// The daemon's own code, such as `unknown_tuner` or `card_error`.
         code: String,
         message: String,
+        /// Machine-readable detail, when the daemon supplied one.
+        reason: String,
     },
 }
 
@@ -42,6 +44,24 @@ impl Refusal {
             Self::Broken(_) => None,
         }
     }
+
+    /// A PC/SC status supplied by the card provider. Older daemons omit it.
+    /// Only the card error's reserved numeric detail is interpreted; display
+    /// text is never used to decide whether a handle needs to be reconnected.
+    pub fn scard_code(&self) -> Option<u32> {
+        let Self::Refused { code, reason, .. } = self else {
+            return None;
+        };
+        if code != "card_error" {
+            return None;
+        }
+        let hex = reason.strip_prefix("scard:")?;
+        if hex.len() != 8 {
+            return None;
+        }
+        let value = u32::from_str_radix(hex, 16).ok()?;
+        (value & 0xffff_0000 == 0x8010_0000).then_some(value)
+    }
 }
 
 impl std::fmt::Display for Refusal {
@@ -52,6 +72,7 @@ impl std::fmt::Display for Refusal {
                 status,
                 code,
                 message,
+                ..
             } => write!(out, "the daemon answered {status} ({code}): {message}"),
         }
     }
@@ -320,13 +341,15 @@ fn read_answer<T: std::io::Read>(answer: &mut http::Response<T>) -> Answered<jso
             Some((
                 problem.text("code").unwrap_or_default().to_owned(),
                 problem.text("message").unwrap_or_default().to_owned(),
+                problem.text("reason").unwrap_or_default().to_owned(),
             ))
         });
-        let (code, message) = problem.unwrap_or_default();
+        let (code, message, reason) = problem.unwrap_or_default();
         return Err(Refusal::Refused {
             status: answer.status,
             code,
             message,
+            reason,
         });
     }
     json::parse(&text).map_err(|reason| Refusal::Broken(io::Error::other(reason)))
@@ -395,5 +418,51 @@ mod tests {
             super::escape("PLEX Smart Card Reader"),
             "PLEX%20Smart%20Card%20Reader"
         );
+    }
+
+    #[test]
+    fn card_status_survives_an_http_error_without_parsing_display_text() {
+        struct Reply(std::io::Cursor<Vec<u8>>);
+        impl std::io::Read for Reply {
+            fn read(&mut self, data: &mut [u8]) -> std::io::Result<usize> {
+                std::io::Read::read(&mut self.0, data)
+            }
+        }
+        impl std::io::Write for Reply {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for (reason, expected) in [
+            (Some("scard:80100068"), Some(0x80100068)),
+            (Some("scard:80100017"), Some(0x80100017)),
+            (None, None), // Older daemons did not supply a detail.
+            (Some("scard:00000000"), None),
+            (Some("scard:80100068extra"), None),
+            (Some("scard:not-hex!"), None),
+        ] {
+            let detail = reason
+                .map(|value| format!(",\"reason\":\"{value}\""))
+                .unwrap_or_default();
+            let body = format!(
+                r#"{{"error":{{"code":"card_error","message":"SCARD_W_REMOVED_CARD"{detail}}}}}"#
+            );
+            let raw = format!(
+                "HTTP/1.1 502 Failure\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let mut response = crate::http::get(
+                Reply(std::io::Cursor::new(raw.into_bytes())),
+                "/",
+                "test",
+                &[],
+            )
+            .unwrap();
+            let refused = super::read_answer(&mut response).unwrap_err();
+            assert_eq!(refused.scard_code(), expected);
+        }
     }
 }

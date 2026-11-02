@@ -38,6 +38,9 @@ impl DaemonCards {
 /// What the daemon reported, as the status code a client library can read
 /// rather than an HTTP failure it has no way to.
 fn translate(refusal: &Refusal) -> Code {
+    if let Some(code) = refusal.scard_code() {
+        return Code(code);
+    }
     match refusal {
         Refusal::Refused { code, message, .. } => match code.as_str() {
             "unknown_tuner" => Code::UNKNOWN_READER,
@@ -106,7 +109,11 @@ struct DaemonCard {
 
 impl DaemonCard {
     fn held(&mut self) -> Result<&mut Held, Code> {
-        self.held.as_mut().ok_or(Code::INVALID_HANDLE)
+        let held = self.held.as_mut().ok_or(Code::INVALID_HANDLE)?;
+        if !held.open() {
+            return Err(Code::RESET_CARD);
+        }
+        Ok(held)
     }
 }
 
@@ -118,8 +125,10 @@ impl Card for DaemonCard {
         if protocols & PROTOCOL_T1 == 0 {
             return Err(Code::PROTO_MISMATCH);
         }
-        let mut old = self.held.take().ok_or(Code::INVALID_HANDLE)?;
-        let _ = old.close(disposition_name(initialization));
+        let old = self.held.as_mut().ok_or(Code::INVALID_HANDLE)?;
+        if old.open() {
+            let _ = old.close(disposition_name(initialization));
+        }
         let held = self
             .cards
             .open(&self.reader, EXCHANGE_WAIT)
@@ -130,6 +139,9 @@ impl Card for DaemonCard {
 
     fn disconnect(&mut self, disposition: u32) -> Result<(), Code> {
         let mut held = self.held.take().ok_or(Code::INVALID_HANDLE)?;
+        if !held.open() {
+            return Ok(());
+        }
         held.close(disposition_name(disposition))
             .map_err(|refusal| translate(&refusal))
     }
@@ -306,6 +318,7 @@ mod tests {
             status: 400,
             code: code.to_owned(),
             message: message.to_owned(),
+            reason: String::new(),
         };
         assert_eq!(
             translate(&refused("unknown_tuner", "")),
@@ -336,5 +349,89 @@ mod tests {
     fn names_are_given_as_both_kinds_of_string() {
         assert_eq!(text("ab"), b"ab\0");
         assert_eq!(wide("ab"), [b'a', 0, b'b', 0, 0, 0]);
+    }
+
+    #[test]
+    fn card_status_is_preserved_for_pcsc_clients() {
+        for code in [0x8010000C, 0x80100017, 0x80100068, 0x80100069] {
+            let refused = Refusal::Refused {
+                status: 502,
+                code: String::from("card_error"),
+                message: String::from("arbitrary display text"),
+                reason: format!("scard:{code:08X}"),
+            };
+            assert_eq!(translate(&refused), Code(code));
+        }
+    }
+
+    #[test]
+    fn a_transient_reconnect_failure_keeps_the_handle_retryable() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = crate::daemon::Endpoint::parse(&listener.local_addr().unwrap().to_string());
+        let worker = std::thread::spawn(move || {
+            let mut connects = 0;
+            for accepted in listener.incoming().take(3) {
+                let mut stream = BufReader::new(accepted.unwrap());
+                loop {
+                    let mut request = String::new();
+                    if stream.read_line(&mut request).unwrap() == 0 {
+                        break;
+                    }
+                    let mut length = 0;
+                    loop {
+                        let mut header = String::new();
+                        stream.read_line(&mut header).unwrap();
+                        if header.trim().is_empty() {
+                            break;
+                        }
+                        if let Some(value) = header.strip_prefix("Content-Length: ") {
+                            length = value.trim().parse::<usize>().unwrap();
+                        }
+                    }
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).unwrap();
+                    let (status, response) = if request.starts_with("POST") {
+                        connects += 1;
+                        if connects == 2 {
+                            (
+                                502,
+                                r#"{"error":{"code":"card_error","message":"transient failure","reason":"scard:80100016"}}"#,
+                            )
+                        } else {
+                            (
+                                200,
+                                r#"{"atr":"3B 80 01 81","protocol":"T=1","max_input":250}"#,
+                            )
+                        }
+                    } else {
+                        (200, r#"{"released":true}"#)
+                    };
+                    write!(
+                        stream.get_mut(),
+                        "HTTP/1.1 {status} Reply\r\nContent-Length: {}\r\n\r\n{response}",
+                        response.len()
+                    )
+                    .unwrap();
+                    stream.get_mut().flush().unwrap();
+                }
+            }
+        });
+        let source = DaemonCards::new(card::Cards::new(endpoint));
+        let (mut held, _) = source
+            .connect("test-reader", SHARE_SHARED, PROTOCOL_T1)
+            .unwrap();
+        assert_eq!(
+            held.reconnect(SHARE_SHARED, PROTOCOL_T1, 1),
+            Err(Code::NOT_TRANSACTED)
+        );
+        assert_eq!(held.begin_transaction(), Err(Code::RESET_CARD));
+        assert_eq!(
+            held.reconnect(SHARE_SHARED, PROTOCOL_T1, 1),
+            Ok(PROTOCOL_T1)
+        );
+        assert_eq!(held.disconnect(0), Ok(()));
+        drop(held);
+        worker.join().unwrap();
     }
 }
