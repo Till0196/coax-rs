@@ -10,7 +10,7 @@
 
 use std::ffi::c_void;
 use std::io::{self, Read, Write};
-use std::os::windows::io::{AsRawSocket, FromRawSocket, OwnedSocket};
+use std::os::windows::io::{AsRawSocket, FromRawSocket, IntoRawSocket, OwnedSocket};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +22,9 @@ const INVALID_SOCKET: Socket_ = usize::MAX;
 const AF_UNIX: i32 = 1;
 const SOCK_STREAM: i32 = 1;
 const SD_BOTH: i32 = 2;
+const WSA_FLAG_OVERLAPPED: u32 = 0x01;
+const WSA_FLAG_NO_HANDLE_INHERIT: u32 = 0x80;
+const HANDLE_FLAG_INHERIT: u32 = 0x01;
 
 /// The address a Unix socket is named by: a family and a path.
 #[repr(C)]
@@ -30,6 +33,7 @@ struct SocketAddress {
     path: [u8; 108],
 }
 
+#[cfg(target_pointer_width = "64")]
 #[repr(C)]
 struct WsaData {
     version: u16,
@@ -41,13 +45,31 @@ struct WsaData {
     system_status: [u8; 129],
 }
 
+#[cfg(target_pointer_width = "32")]
+#[repr(C)]
+struct WsaData {
+    version: u16,
+    high_version: u16,
+    description: [u8; 257],
+    system_status: [u8; 129],
+    max_sockets: u16,
+    max_udp: u16,
+    vendor_info: *mut u8,
+}
+
 #[link(name = "ws2_32")]
 unsafe extern "system" {
     fn WSAStartup(version: u16, data: *mut WsaData) -> i32;
     // Reads this thread's last error.
     safe fn WSAGetLastError() -> i32;
-    // Makes a new socket from numbers, like opening a file.
-    safe fn socket(family: i32, kind: i32, protocol: i32) -> Socket_;
+    fn WSASocketW(
+        family: i32,
+        kind: i32,
+        protocol: i32,
+        info: *const c_void,
+        group: u32,
+        flags: u32,
+    ) -> Socket_;
     fn connect(socket: Socket_, address: *const c_void, length: i32) -> i32;
     fn bind(socket: Socket_, address: *const c_void, length: i32) -> i32;
     fn listen(socket: Socket_, backlog: i32) -> i32;
@@ -74,6 +96,58 @@ unsafe extern "system" {
 /// `SIO_AF_UNIX_GETPEERPID` (`_WSAIOR(IOC_VENDOR, 256)`): the process at the
 /// other end of a Unix socket. Windows 10 1903 and later.
 const SIO_AF_UNIX_GETPEERPID: u32 = 0x5800_0100;
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn SetHandleInformation(handle: *mut c_void, mask: u32, flags: u32) -> i32;
+}
+
+fn new_socket() -> io::Result<OwnedSocket> {
+    start_winsock()?;
+    // SAFETY: no protocol information is supplied. Disable inheritance at
+    // creation so a concurrently started child cannot keep this socket open.
+    unsafe {
+        own_socket(
+            WSASocketW(
+                AF_UNIX,
+                SOCK_STREAM,
+                0,
+                std::ptr::null(),
+                0,
+                WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT,
+            ),
+            "open a socket",
+        )
+    }
+}
+
+/// Takes ownership of a newly created or accepted socket.
+///
+/// # Safety
+/// `handle` must be a fresh, exclusively owned socket, or `INVALID_SOCKET`.
+unsafe fn own_socket(handle: Socket_, doing: &str) -> io::Result<OwnedSocket> {
+    if handle == INVALID_SOCKET {
+        return Err(last_error(doing));
+    }
+    // SAFETY: the caller transfers sole ownership of this valid socket.
+    Ok(unsafe { OwnedSocket::from_raw_socket(handle as _) })
+}
+
+fn checked(status: i32, doing: &str) -> io::Result<()> {
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(last_error(doing))
+    }
+}
+
+fn prevent_inheritance(socket: &OwnedSocket) -> io::Result<()> {
+    // SAFETY: the borrow keeps this socket open throughout the call.
+    if unsafe { SetHandleInformation(socket.as_raw_socket() as _, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
 
 /// The socket options this sets: how long a read or a write may sit before it
 /// gives up, in milliseconds.
@@ -147,26 +221,24 @@ fn address_of(path: &str) -> io::Result<SocketAddress> {
 
 impl Socket {
     pub fn connect(path: &str) -> io::Result<Self> {
-        start_winsock()?;
         let address = address_of(path)?;
-        let handle = socket(AF_UNIX, SOCK_STREAM, 0);
-        if handle == INVALID_SOCKET {
-            return Err(last_error("open a socket"));
-        }
-        let socket = Self::from_raw(handle);
-        let length = size_of::<SocketAddress>() as i32;
+        let socket = Self::from_handle(new_socket()?);
+        let doing = format!("reach the daemon at {path}");
         // SAFETY: the address is a local of the length given.
-        if unsafe { connect(socket.raw(), (&raw const address).cast(), length) } != 0 {
-            return Err(last_error(&format!("reach the daemon at {path}")));
-        }
+        checked(
+            unsafe {
+                connect(
+                    socket.raw(),
+                    (&raw const address).cast(),
+                    size_of::<SocketAddress>() as i32,
+                )
+            },
+            &doing,
+        )?;
         Ok(socket)
     }
 
-    fn from_raw(handle: Socket_) -> Self {
-        // SAFETY: only called on a socket just made or accepted, which nothing
-        // else holds.
-        let handle =
-            unsafe { OwnedSocket::from_raw_socket(handle as std::os::windows::io::RawSocket) };
+    fn from_handle(handle: OwnedSocket) -> Self {
         Self {
             handle: Arc::new(handle),
         }
@@ -215,9 +287,7 @@ impl Socket {
                     size_of::<u32>() as i32,
                 )
             };
-            if set != 0 {
-                return Err(last_error("set a timeout on the socket"));
-            }
+            checked(set, "set a timeout on the socket")?;
         }
         Ok(())
     }
@@ -310,13 +380,8 @@ pub struct Listener {
     closed: AtomicBool,
 }
 
-// As for `Socket`: the sharing is an accept against a close from another thread.
-unsafe impl Send for Listener {}
-unsafe impl Sync for Listener {}
-
 impl Listener {
     pub fn bind(path: &Path) -> io::Result<Self> {
-        start_winsock()?;
         let written = path.to_str().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -324,34 +389,38 @@ impl Listener {
             )
         })?;
         let address = address_of(written)?;
-        let handle = socket(AF_UNIX, SOCK_STREAM, 0);
-        if handle == INVALID_SOCKET {
-            return Err(last_error("open a socket"));
-        }
         let listener = Self {
-            handle,
+            handle: new_socket()?.into_raw_socket() as Socket_,
             closed: AtomicBool::new(false),
         };
-        let length = size_of::<SocketAddress>() as i32;
+        let doing = format!("listen on {written}");
         // SAFETY: the address is a local of the length given.
-        if unsafe { bind(handle, (&raw const address).cast(), length) } != 0 {
-            return Err(last_error(&format!("listen on {written}")));
-        }
-        // SOMAXCONN.
+        checked(
+            unsafe {
+                bind(
+                    listener.handle,
+                    (&raw const address).cast(),
+                    size_of::<SocketAddress>() as i32,
+                )
+            },
+            &doing,
+        )?;
         // SAFETY: takes numbers only; the socket is this listener's.
-        if unsafe { listen(handle, 0x7fff_ffff) } != 0 {
-            return Err(last_error(&format!("listen on {written}")));
-        }
+        checked(unsafe { listen(listener.handle, 0x7fff_ffff) }, &doing)?;
         Ok(listener)
     }
 
     pub fn accept(&self) -> io::Result<Socket> {
-        // SAFETY: asks for no address, so nothing is written.
-        let handle = unsafe { accept(self.handle, std::ptr::null_mut(), std::ptr::null_mut()) };
-        if handle == INVALID_SOCKET {
-            return Err(last_error("accept a client"));
-        }
-        Ok(Socket::from_raw(handle))
+        // SAFETY: accept writes no address, and transfers sole ownership of
+        // its result to own_socket. Errors cannot leak the accepted socket.
+        let handle = unsafe {
+            own_socket(
+                accept(self.handle, std::ptr::null_mut(), std::ptr::null_mut()),
+                "accept a client",
+            )
+        }?;
+        prevent_inheritance(&handle)?;
+        Ok(Socket::from_handle(handle))
     }
 
     /// Ends an accept another thread is waiting in: on Windows that takes
@@ -411,4 +480,53 @@ fn last_error(doing: &str) -> io::Error {
         _ => io::ErrorKind::Other,
     };
     io::Error::new(kind, format!("could not {doing}: winsock error {code}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetHandleInformation(handle: *mut c_void, flags: *mut u32) -> i32;
+    }
+
+    fn assert_not_inheritable(handle: Socket_) {
+        let mut flags = 0;
+        // SAFETY: flags is writable and the caller keeps the socket open.
+        assert_ne!(
+            unsafe { GetHandleInformation(handle as *mut c_void, &mut flags) },
+            0
+        );
+        assert_eq!(
+            flags & HANDLE_FLAG_INHERIT,
+            0,
+            "a child could retain the socket"
+        );
+    }
+
+    #[test]
+    fn winsock_data_matches_the_windows_abi() {
+        let (size, description, vendor) = if cfg!(target_pointer_width = "64") {
+            (408, 16, 8)
+        } else {
+            (400, 4, 396)
+        };
+        assert_eq!(size_of::<WsaData>(), size);
+        assert_eq!(std::mem::offset_of!(WsaData, description), description);
+        assert_eq!(std::mem::offset_of!(WsaData, vendor_info), vendor);
+    }
+
+    #[test]
+    fn connected_and_accepted_sockets_are_not_inheritable() {
+        let path = std::env::temp_dir().join(format!("coax-socket-{}.sock", std::process::id()));
+        let listener = Listener::bind(&path).unwrap();
+        assert_not_inheritable(listener.handle);
+        let client = Socket::connect(path.to_str().unwrap()).unwrap();
+        assert_not_inheritable(client.raw());
+        let accepted = listener.accept().unwrap();
+        assert_not_inheritable(accepted.raw());
+        drop((accepted, client, listener));
+        let _ = std::fs::remove_file(path);
+    }
 }
