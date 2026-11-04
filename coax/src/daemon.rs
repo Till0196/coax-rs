@@ -723,6 +723,7 @@ fn boards_from(boards: &json::Value) -> io::Result<Vec<Board>> {
             backend: text(board, "backend"),
             location: text(board, "location"),
             serial: text(board, "serial"),
+            enclosure: text(board, "enclosure"),
             tuners: held,
         });
     }
@@ -740,6 +741,9 @@ pub struct Board {
     pub backend: String,
     pub location: String,
     pub serial: String,
+    /// The same for every board of one enclosure, empty for a board that stands
+    /// alone and from a daemon too old to say.
+    pub enclosure: String,
     pub tuners: Vec<Held>,
 }
 
@@ -1511,6 +1515,21 @@ mod tests {
         assert!(free.tuned.is_empty());
         // Zero is a real priority, so a tuner nobody holds cannot report one.
         assert_eq!(free.priority, None);
+    }
+
+    /// The two boards of an enclosure say the same enclosure, and a board that
+    /// stands alone says none.
+    #[test]
+    fn a_board_says_which_enclosure_it_is_one_of() {
+        let boards = super::boards_of(
+            r#"[{"name":"px3:a","backend":"px3","enclosure":"001:020","tuners":[]},
+                {"name":"px3:b","backend":"px3","enclosure":"001:020","tuners":[]},
+                {"name":"pt3:c","backend":"pt3","tuners":[]}]"#,
+        )
+        .unwrap();
+        assert_eq!(boards[0].enclosure, "001:020");
+        assert_eq!(boards[1].enclosure, boards[0].enclosure);
+        assert!(boards[2].enclosure.is_empty());
     }
 
     /// A daemon that has never heard of priorities says nothing about them,
