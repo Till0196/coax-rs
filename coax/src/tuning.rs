@@ -97,6 +97,9 @@ pub struct TunerSetting {
     pub lnb: String,
     /// The front end's gain: `auto`, `min`, `max`, `+13dB`. Empty says nothing.
     pub gain: String,
+    /// The level of the tuner's own loop-through output, the signal it hands on
+    /// to the tuner fed from it: `max`, `high`, `mid`, `low`. Empty says nothing.
+    pub loop_through: String,
 }
 
 impl TunerSetting {
@@ -109,8 +112,8 @@ impl TunerSetting {
                 .any(|allowed| delivery::same(allowed, system))
     }
 
-    /// What it adds to a tune of a system: `lnb_power` on a satellite, and
-    /// `gain`.
+    /// What it adds to a tune of a system: `lnb_power` on a satellite,
+    /// `gain` and `loop_through`.
     pub fn words(&self, system: &str) -> Vec<(&'static str, String)> {
         let mut words = Vec::new();
         let lnb = self.lnb.trim();
@@ -120,6 +123,10 @@ impl TunerSetting {
         let gain = self.gain.trim();
         if !gain.is_empty() {
             words.push(("gain", gain.to_owned()));
+        }
+        let loop_through = self.loop_through.trim();
+        if !loop_through.is_empty() {
+            words.push(("loop_through", loop_through.to_owned()));
         }
         words
     }
@@ -283,6 +290,18 @@ mod tests {
         );
         assert_eq!(setting.words("ISDBT"), [("gain", String::from("+13dB"))]);
         assert!(TunerSetting::default().words("DVBS2").is_empty());
+    }
+
+    #[test]
+    fn a_tuners_setting_adds_its_loop_through_output() {
+        let setting = TunerSetting {
+            loop_through: String::from("low"),
+            ..TunerSetting::default()
+        };
+        assert_eq!(
+            setting.words("ISDBT"),
+            [("loop_through", String::from("low"))]
+        );
     }
 
     /// A tuner that names ISDB-S may be given ISDB-S3 by a person, and is then

@@ -775,6 +775,8 @@ pub struct Controls {
     pub lnb: Option<LnbControl>,
     /// The amplifier (`gain`), where it can be set.
     pub gain: Option<GainControl>,
+    /// The tuner's own loop-through output (`loop_through`), where it can be set.
+    pub loop_through: Option<LoopThroughControl>,
 }
 
 /// What `lnb_power` may ask of a tuner.
@@ -807,6 +809,14 @@ pub struct GainControl {
     /// The systems it is set for, where it sits on one input only. Empty means
     /// every system the tuner receives.
     pub deliveries: Vec<String>,
+}
+
+/// What `loop_through` may ask of a tuner.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LoopThroughControl {
+    /// The output is only on or off: `max` turns it on and `low` off. Otherwise
+    /// it has the four levels `max`, `high`, `mid` and `low`.
+    pub switch: bool,
 }
 
 /// Reads a tuner's `controls`.
@@ -851,6 +861,11 @@ fn controls_of(tuner: &json::Value) -> Controls {
                 .unwrap_or_default(),
             deliveries: strings(gain, "deliveries"),
         }),
+        loop_through: said
+            .get("loop_through")
+            .map(|loop_through| LoopThroughControl {
+                switch: loop_through.text("kind") == Some("switch"),
+            }),
     }
 }
 
@@ -1506,7 +1521,10 @@ mod tests {
             r#"[{"name":"example:A","description":"Example Q4","backend":"example","tuners":[
                 {"id":"example:A:0","leased":false,"deliveries":["ISDB-S"],
                  "controls":{"lnb":{"levels":["off","low","high"],"shared":"board"},
-                             "gain":{"kind":"steps","decibels":[0,1,2,3]}}},
+                             "gain":{"kind":"steps","decibels":[0,1,2,3]},
+                             "loop_through":{"kind":"steps"}}},
+                {"id":"example:A:1","leased":false,"deliveries":["ISDB-T"],
+                 "controls":{"loop_through":{"kind":"switch"}}},
                 {"id":"example:A:2","leased":false,"deliveries":["ISDB-T"]}]}]"#,
         )
         .unwrap();
@@ -1519,7 +1537,15 @@ mod tests {
             [0.0, 1.0, 2.0, 3.0]
         );
         assert_eq!(
-            boards[0].tuners[1].controls,
+            satellite.loop_through,
+            Some(super::LoopThroughControl { switch: false })
+        );
+        assert_eq!(
+            boards[0].tuners[1].controls.loop_through,
+            Some(super::LoopThroughControl { switch: true })
+        );
+        assert_eq!(
+            boards[0].tuners[2].controls,
             super::Controls::default(),
             "指定しなければ何も無い"
         );
