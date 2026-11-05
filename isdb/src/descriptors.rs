@@ -2066,17 +2066,18 @@ pub fn hyperlink(body: &[u8]) -> Option<Hyperlink> {
 }
 
 /// What a multimedia service information descriptor (0x803F, STD-B60
-/// 7.4.3.47) says of an HTML5 data service.
+/// 7.4.3.47) says of subtitle or multimedia content.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MultimediaService {
-    /// The data coding system (0x0020 the application, 0x0021 the
-    /// additional data of a programme).
+    /// The data coding system (0x0020 second-generation subtitles,
+    /// 0x0021 second-generation multimedia).
     pub data_component_id: u16,
     /// For 0x0020: the component and a description.
     pub component_tag: Option<u16>,
     pub language: String,
     pub text: String,
-    /// For 0x0021: whether the service has content tied to the programme.
+    /// For 0x0021: whether an additional data service has programme-associated
+    /// content. Always false for other services.
     pub associated_contents: Option<bool>,
     pub selector: Vec<u8>,
 }
