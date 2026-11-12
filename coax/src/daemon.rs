@@ -360,9 +360,10 @@ pub fn declare(said: &[(String, Vec<String>)], tuners: &mut [Tuner]) {
 ///
 /// A pattern is what the settings hold -- `example:*` rather than an identifier --
 /// and the daemon takes identifiers. The free ones come first because a tuner
-/// someone else holds is refused. Nothing matching gives back the patterns that
-/// name a tuner outright, and failing that a single unnamed candidate, leaving
-/// the choice to the daemon.
+/// someone else holds is refused. Patterns that match no tuner give no
+/// candidate: the tuners they name are not there, and another tuner would be
+/// one the settings did not ask for. No patterns at all give a single unnamed
+/// candidate, leaving the choice to the daemon.
 pub fn candidates(tuners: &[Tuner], patterns: &[String], system: &str) -> Vec<Option<String>> {
     if patterns.is_empty() {
         return vec![None];
@@ -380,15 +381,7 @@ pub fn candidates(tuners: &[Tuner], patterns: &[String], system: &str) -> Vec<Op
         }
     }
     free.extend(busy);
-    if !free.is_empty() {
-        return free;
-    }
-    let named: Vec<Option<String>> = patterns
-        .iter()
-        .filter(|pattern| !pattern.contains('*'))
-        .map(|pattern| Some(pattern.clone()))
-        .collect();
-    if named.is_empty() { vec![None] } else { named }
+    free
 }
 
 /// What a pattern says when it names a model rather than a tuner, which is what
@@ -1721,6 +1714,24 @@ mod tests {
         assert!(one.matches("example:aaaabbbbccccdddd:0"));
         assert!(!one.matches("example:aaaabbbbccccdddd:1"));
         assert!(!one.matches("sample:*"));
+    }
+
+    /// Patterns that match none of the tuners there give no candidate, rather
+    /// than leave the choice to the daemon; no patterns at all do leave it.
+    #[test]
+    fn patterns_matching_nothing_give_no_tuner() {
+        let tuners = [tuner("pt3:a:0", &["ISDBT"]), tuner("pt3:a:1", &["ISDBS"])];
+        let wanted = |patterns: &[&str]| -> Vec<String> {
+            patterns.iter().map(|one| (*one).to_owned()).collect()
+        };
+        assert!(super::candidates(&tuners, &wanted(&["dt195w:*"]), "ISDBT").is_empty());
+        assert!(super::candidates(&tuners, &wanted(&["dt195w:x:0"]), "ISDBT").is_empty());
+        assert!(super::candidates(&tuners, &wanted(&["pt3:*"]), "DVBS2").is_empty());
+        assert_eq!(
+            super::candidates(&tuners, &wanted(&["dt195w:*", "pt3:*"]), "ISDBT"),
+            vec![Some("pt3:a:0".to_owned())]
+        );
+        assert_eq!(super::candidates(&tuners, &[], "ISDBT"), vec![None]);
     }
 
     /// A tuner that lists no delivery systems is tried rather than ruled out:
