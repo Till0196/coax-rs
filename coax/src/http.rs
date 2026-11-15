@@ -100,6 +100,25 @@ pub fn send<T: Read + Write>(
     send_on(reader, method, path, host, body, &[], true)
 }
 
+/// The last request on a connection that carried others, or the one request on
+/// a connection opened for it: it asks the daemon to close the connection once
+/// it has answered.
+///
+/// The daemon is the one to close, rather than this side the moment the answer
+/// is in. On Windows a close that reaches the daemon's socket in the same
+/// microsecond as the daemon starts reading for the next request can leave that
+/// read waiting for good, and the daemon then counts a connection that is gone.
+/// A daemon told the connection ends does not read for another request.
+pub fn send_last<T: Read + Write>(
+    reader: BufReader<T>,
+    method: &str,
+    path: &str,
+    host: &str,
+    body: Option<&str>,
+) -> io::Result<Response<T>> {
+    send_on(reader, method, path, host, body, &[], false)
+}
+
 /// The same on a connection that is to carry another request afterwards.
 ///
 /// The daemon ties a tuner to the connection that asked for it, so a caller
@@ -395,7 +414,7 @@ pub fn query(parameters: &[(&str, String)]) -> String {
 mod tests {
     use std::io::Cursor;
 
-    use super::{get, query};
+    use super::{get, query, send_last};
 
     /// A connection that answers from a script and remembers what was asked.
     #[derive(Debug)]
@@ -525,5 +544,25 @@ mod tests {
             rendered,
             "?DELIVERY_SYSTEM=DVBC%2FANNEX_A&FREQUENCY=473142857"
         );
+    }
+
+    /// The last request asks the daemon to close, and its connection is not
+    /// carried on even when the daemon answers keep-alive.
+    #[test]
+    fn the_last_request_asks_the_daemon_to_close() {
+        let mut response = send_last(
+            std::io::BufReader::new(answering(
+                "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\n{}",
+            )),
+            "GET",
+            "/cards",
+            "coaxd",
+            None,
+        )
+        .expect("the answer parses");
+        assert_eq!(response.read_to_end().expect("the body reads"), b"{}");
+        assert!(!response.reusable());
+        let asked = String::from_utf8(response.into_reader().into_inner().asked).expect("text");
+        assert!(asked.contains("\r\nConnection: close\r\n"), "{asked}");
     }
 }

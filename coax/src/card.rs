@@ -191,7 +191,7 @@ impl Cards {
             max_input: 0,
             transaction: false,
         };
-        let opened = held.call("POST", "/connect", Some("{}"))?;
+        let opened = held.call("POST", "/connect", Some("{}"), false)?;
         held.atr = parse_hex(opened.text("atr").unwrap_or_default());
         held.max_input = opened
             .get("max_input")
@@ -205,7 +205,7 @@ impl Cards {
     fn once(&self, method: &str, path: &str, body: Option<&str>) -> Answered<json::Value> {
         let connection = Connection::to(&self.endpoint)?;
         connection.set_read_timeout(ASKING)?;
-        let mut answer = http::send(
+        let mut answer = http::send_last(
             BufReader::new(connection),
             method,
             path,
@@ -257,12 +257,12 @@ impl Held {
     /// included.
     pub fn transmit(&mut self, command: &[u8]) -> Answered<Vec<u8>> {
         let body = format!("{{\"apdu\":\"{}\"}}", format_hex(command));
-        let answered = self.call("POST", "/transmit", Some(&body))?;
+        let answered = self.call("POST", "/transmit", Some(&body), false)?;
         Ok(parse_hex(answered.text("response").unwrap_or_default()))
     }
 
     pub fn begin_transaction(&mut self) -> Answered<()> {
-        self.call("POST", "/transaction", Some("{}"))?;
+        self.call("POST", "/transaction", Some("{}"), false)?;
         self.transaction = true;
         Ok(())
     }
@@ -277,6 +277,7 @@ impl Held {
             "DELETE",
             &format!("/transaction?disposition={disposition}"),
             None,
+            false,
         )?;
         Ok(())
     }
@@ -289,17 +290,26 @@ impl Held {
         if self.transaction {
             let _ = self.end_transaction("leave");
         }
+        // The last request on the connection: the daemon closes it.
         let result = self.call(
             "DELETE",
             &format!("/connect?disposition={disposition}"),
             None,
+            true,
         );
         self.link = None;
         result.map(|_| ())
     }
 
-    /// One request on the connection that owns this card.
-    fn call(&mut self, method: &str, path: &str, body: Option<&str>) -> Answered<json::Value> {
+    /// One request on the connection that owns this card; `last` when nothing
+    /// is to follow it (http::send_last).
+    fn call(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        last: bool,
+    ) -> Answered<json::Value> {
         let link = self.link.take().ok_or_else(|| {
             Refusal::Broken(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -311,7 +321,11 @@ impl Held {
         // A broken connection has taken the card with it. Not putting the
         // reader back is what makes the next call say so, rather than write
         // into a socket nobody is reading.
-        let mut answer = http::send(link, method, &target, &host, body)?;
+        let mut answer = if last {
+            http::send_last(link, method, &target, &host, body)?
+        } else {
+            http::send(link, method, &target, &host, body)?
+        };
         let parsed = read_answer(&mut answer);
         // Put back only when the answer left the connection able to carry
         // another request; anything else and the card is gone with it.
