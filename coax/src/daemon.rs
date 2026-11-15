@@ -179,6 +179,11 @@ pub(crate) fn user_id() -> u32 {
 /// than waited on for ever.
 const WAIT: Duration = Duration::from_secs(30);
 
+/// How long the last question on a connection about to be let go of may take:
+/// it is only there so that the daemon closes the connection, and a daemon that
+/// does not answer it is closed on anyway.
+const FAREWELL: Duration = Duration::from_secs(1);
+
 /// How much a request's work matters, as the daemon weighs it against
 /// everything else asking for a tuner.
 ///
@@ -410,6 +415,12 @@ pub struct Lease {
     priority: i32,
 }
 
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.hand_back();
+    }
+}
+
 /// What a tune answered: which tuner did it, whether it locked, and what it
 /// measured.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -553,8 +564,25 @@ impl Lease {
 
     /// Gives the tuner back.
     pub fn release(&mut self) {
-        self.reader = None;
+        self.hand_back();
         self.tuner = None;
+    }
+
+    /// Ends the kept connection, which gives the tuner back, with one last
+    /// question that asks the daemon to close it rather than closing it here
+    /// the moment the last answer is in (see http::send_last).
+    fn hand_back(&mut self) {
+        let Some(reader) = self.reader.take() else {
+            return;
+        };
+        if reader.get_ref().set_read_timeout(FAREWELL).is_err() {
+            return;
+        }
+        if let Ok(mut answer) =
+            http::send_last(reader, "GET", "/version", self.endpoint.host_header(), None)
+        {
+            let _ = answer.read_to_end();
+        }
     }
 
     /// The properties of a request, with the tuner named where one has been
@@ -1106,7 +1134,12 @@ impl Daemon {
         };
         let socket = unix_socket::Socket::connect(path)?;
         let pid = socket.peer_process();
-        socket.shutdown();
+        // Asked and answered rather than dropped straight away, so that the
+        // daemon is the one to close (see http::send_last).
+        let _ = socket.set_timeout(FAREWELL);
+        if let Ok(mut answer) = http::get(socket, "/version", self.endpoint.host_header(), &[]) {
+            let _ = answer.read_to_end();
+        }
         let pid = pid?;
         Ok(Serving {
             pid,
@@ -1327,6 +1360,47 @@ mod tests {
         let socket = super::unix_socket::Socket::connect(&path.to_string_lossy()).expect("connect");
         let _accepted = listener.accept().expect("accept");
         assert_eq!(socket.peer_process().expect("named"), std::process::id());
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Letting go of a lease ends its connection with a last question that asks
+    /// the daemon to close, rather than closing straight after the last answer.
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn a_lease_let_go_of_asks_the_daemon_to_close() {
+        use std::io::{Read, Write};
+        let path = std::env::temp_dir().join(format!("coax-lease-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = super::unix_socket::Listener::bind(&path).expect("bind");
+        let endpoint = super::Endpoint::Socket(path.to_string_lossy().into_owned());
+        let lease = super::Lease {
+            endpoint: endpoint.clone(),
+            reader: Some(std::io::BufReader::new(
+                super::Connection::to(&endpoint).expect("connect"),
+            )),
+            tuner: None,
+            priority: 0,
+        };
+        let mut accepted = listener.accept().expect("accept");
+        let daemon = std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !asked.windows(4).any(|end| end == b"\r\n\r\n") {
+                let n = accepted.read(&mut buffer).expect("read");
+                if n == 0 {
+                    break;
+                }
+                asked.extend_from_slice(&buffer[..n]);
+            }
+            let _ = accepted
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}");
+            String::from_utf8(asked).expect("text")
+        });
+        drop(lease);
+        let asked = daemon.join().expect("the daemon thread");
+        assert!(asked.starts_with("GET /version "), "{asked}");
+        assert!(asked.contains("\r\nConnection: close\r\n"), "{asked}");
         drop(listener);
         let _ = std::fs::remove_file(&path);
     }
